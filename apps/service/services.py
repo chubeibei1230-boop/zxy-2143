@@ -117,6 +117,8 @@ class ServiceItemStateMachine:
         elif target_status == ServiceStatus.PENDING_REVIEW:
             if 'handler_note' in kwargs:
                 self.service_item.handler_note = kwargs['handler_note']
+            if 'reviewer_id' in kwargs and kwargs['reviewer_id']:
+                self.service_item.reviewer_id = kwargs['reviewer_id']
         elif target_status == ServiceStatus.CLOSED:
             self.service_item.review_time = now
             self.service_item.close_time = now

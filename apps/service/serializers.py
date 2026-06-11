@@ -114,7 +114,7 @@ class ServiceItemDetailSerializer(serializers.ModelSerializer):
                 return True
             return False
         if user.is_operator_b:
-            if obj.status == ServiceStatus.PENDING_REVIEW:
+            if obj.reviewer_id == user.id and obj.status == ServiceStatus.PENDING_REVIEW:
                 return True
             if obj.assignee_id == user.id and not obj.is_final:
                 return True
@@ -151,6 +151,7 @@ class StatusTransitionSerializer(serializers.Serializer):
     target_status = serializers.ChoiceField(choices=ServiceStatus.choices)
     note = serializers.CharField(required=False, allow_blank=True, default='')
     assignee_id = serializers.IntegerField(required=False, allow_null=True)
+    reviewer_id = serializers.IntegerField(required=False, allow_null=True)
     handler_note = serializers.CharField(required=False, allow_blank=True)
     review_note = serializers.CharField(required=False, allow_blank=True)
     cancel_reason = serializers.CharField(required=False, allow_blank=True)
@@ -229,7 +230,7 @@ class TodoItemSerializer(serializers.ModelSerializer):
                 return True
             return False
         if user.is_operator_b:
-            if obj.status == ServiceStatus.PENDING_REVIEW:
+            if obj.reviewer_id == user.id and obj.status == ServiceStatus.PENDING_REVIEW:
                 return True
             if obj.assignee_id == user.id and not obj.is_final:
                 return True

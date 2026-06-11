@@ -176,6 +176,7 @@ class ServiceItemViewSet(viewsets.GenericViewSet,
                 target_status=data['target_status'],
                 note=data.get('note', ''),
                 assignee_id=data.get('assignee_id'),
+                reviewer_id=data.get('reviewer_id'),
                 handler_note=data.get('handler_note'),
                 review_note=data.get('review_note'),
                 cancel_reason=data.get('cancel_reason'),
@@ -310,7 +311,7 @@ class WorkbenchViewSet(viewsets.GenericViewSet):
             )
         elif user.is_operator_b:
             qs = qs.filter(
-                Q(status=ServiceStatus.PENDING_REVIEW) |
+                (Q(reviewer=user) & Q(status=ServiceStatus.PENDING_REVIEW)) |
                 (Q(assignee=user) & ~Q(status__in=[ServiceStatus.CLOSED, ServiceStatus.CANCELLED])) |
                 (Q(creator=user) & ~Q(status__in=[ServiceStatus.CLOSED, ServiceStatus.CANCELLED]))
             )
@@ -351,7 +352,10 @@ class WorkbenchViewSet(viewsets.GenericViewSet):
     def statistics(self, request):
         user = request.user
         accessible_qs = self._get_accessible_queryset(request)
+        accessible_qs = self._apply_filters(accessible_qs, request)
+
         todo_qs = self._get_todo_queryset(request)
+        todo_qs = self._apply_filters(todo_qs, request)
 
         total_count = accessible_qs.count()
         pending_accept_count = accessible_qs.filter(status=ServiceStatus.PENDING_ACCEPT).count()
@@ -366,8 +370,9 @@ class WorkbenchViewSet(viewsets.GenericViewSet):
             assignee=user,
         ).exclude(status__in=[ServiceStatus.CLOSED, ServiceStatus.CANCELLED]).count()
         my_review_count = accessible_qs.filter(
+            reviewer=user,
             status=ServiceStatus.PENDING_REVIEW
-        ).count() if user.is_admin or user.is_operator_b else 0
+        ).count()
 
         status_stats = [
             {'status': s.value, 'status_display': s.label,
@@ -429,12 +434,9 @@ class WorkbenchViewSet(viewsets.GenericViewSet):
         if item_type == 'created':
             qs = qs.filter(creator=user)
         elif item_type == 'assigned':
-            qs = qs.filter(assignee=user)
+            qs = qs.filter(assignee=user).exclude(status__in=[ServiceStatus.CLOSED, ServiceStatus.CANCELLED])
         elif item_type == 'review':
-            if user.is_admin or user.is_operator_b:
-                qs = qs.filter(status=ServiceStatus.PENDING_REVIEW)
-            else:
-                qs = qs.none()
+            qs = qs.filter(reviewer=user, status=ServiceStatus.PENDING_REVIEW)
 
         qs = self._apply_filters(qs, request)
         qs = qs.order_by('-created_at')
