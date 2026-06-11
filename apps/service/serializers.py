@@ -50,6 +50,8 @@ class ServiceItemDetailSerializer(serializers.ModelSerializer):
     status_display = serializers.CharField(read_only=True)
     is_final = serializers.BooleanField(read_only=True)
     available_transitions = serializers.SerializerMethodField()
+    is_my_todo = serializers.SerializerMethodField()
+    my_role_in_item = serializers.SerializerMethodField()
 
     class Meta:
         model = ServiceItem
@@ -66,6 +68,7 @@ class ServiceItemDetailSerializer(serializers.ModelSerializer):
             'accept_time', 'process_start_time', 'review_time', 'close_time',
             'cancel_time', 'cancel_reason',
             'created_at', 'updated_at', 'version',
+            'is_my_todo', 'my_role_in_item',
         ]
         read_only_fields = [
             'id', 'item_no', 'status', 'status_display', 'is_final',
@@ -73,6 +76,7 @@ class ServiceItemDetailSerializer(serializers.ModelSerializer):
             'service_type_id', 'site_id',
             'accept_time', 'process_start_time', 'review_time', 'close_time',
             'cancel_time', 'cancel_reason', 'created_at', 'updated_at', 'version',
+            'is_my_todo', 'my_role_in_item',
         ]
 
     def get_available_transitions(self, obj):
@@ -80,6 +84,44 @@ class ServiceItemDetailSerializer(serializers.ModelSerializer):
             {'value': s, 'label': ServiceStatus(s).label}
             for s in obj.get_available_transitions()
         ]
+
+    def get_is_my_todo(self, obj):
+        user = self.context.get('request').user
+        if not user or not user.is_authenticated:
+            return False
+        return self._is_todo_for_user(obj, user)
+
+    def get_my_role_in_item(self, obj):
+        user = self.context.get('request').user
+        if not user or not user.is_authenticated:
+            return []
+        roles = []
+        if obj.creator_id == user.id:
+            roles.append('creator')
+        if obj.assignee_id == user.id:
+            roles.append('assignee')
+        if obj.reviewer_id == user.id:
+            roles.append('reviewer')
+        return roles
+
+    def _is_todo_for_user(self, obj, user):
+        if user.is_admin:
+            return not obj.is_final
+        if user.is_operator_a:
+            if obj.creator_id == user.id and not obj.is_final:
+                return True
+            if obj.assignee_id == user.id and not obj.is_final:
+                return True
+            return False
+        if user.is_operator_b:
+            if obj.status == ServiceStatus.PENDING_REVIEW:
+                return True
+            if obj.assignee_id == user.id and not obj.is_final:
+                return True
+            if obj.creator_id == user.id and not obj.is_final:
+                return True
+            return False
+        return False
 
 
 class ServiceItemCreateSerializer(serializers.Serializer):
@@ -139,3 +181,81 @@ class AuditLogSerializer(serializers.ModelSerializer):
             'before_snapshot', 'after_snapshot',
             'created_at',
         ]
+
+
+class TodoItemSerializer(serializers.ModelSerializer):
+    service_type = ServiceTypeSerializer(read_only=True)
+    site = ServiceSiteSerializer(read_only=True)
+    status_display = serializers.CharField(read_only=True)
+    is_my_todo = serializers.SerializerMethodField()
+    my_role_in_item = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ServiceItem
+        fields = [
+            'id', 'item_no', 'title', 'service_type', 'site',
+            'applicant_name', 'applicant_phone',
+            'status', 'status_display',
+            'appointment_time', 'created_at', 'updated_at',
+            'is_my_todo', 'my_role_in_item',
+        ]
+
+    def get_is_my_todo(self, obj):
+        user = self.context.get('request').user
+        if not user or not user.is_authenticated:
+            return False
+        return self._is_todo_for_user(obj, user)
+
+    def get_my_role_in_item(self, obj):
+        user = self.context.get('request').user
+        if not user or not user.is_authenticated:
+            return []
+        roles = []
+        if obj.creator_id == user.id:
+            roles.append('creator')
+        if obj.assignee_id == user.id:
+            roles.append('assignee')
+        if obj.reviewer_id == user.id:
+            roles.append('reviewer')
+        return roles
+
+    def _is_todo_for_user(self, obj, user):
+        if user.is_admin:
+            return not obj.is_final
+        if user.is_operator_a:
+            if obj.creator_id == user.id and not obj.is_final:
+                return True
+            if obj.assignee_id == user.id and not obj.is_final:
+                return True
+            return False
+        if user.is_operator_b:
+            if obj.status == ServiceStatus.PENDING_REVIEW:
+                return True
+            if obj.assignee_id == user.id and not obj.is_final:
+                return True
+            if obj.creator_id == user.id and not obj.is_final:
+                return True
+            return False
+        return False
+
+
+class StatusStatsSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    status_display = serializers.CharField()
+    count = serializers.IntegerField()
+
+
+class WorkbenchStatsSerializer(serializers.Serializer):
+    total_count = serializers.IntegerField()
+    pending_accept_count = serializers.IntegerField()
+    processing_count = serializers.IntegerField()
+    pending_review_count = serializers.IntegerField()
+    closed_count = serializers.IntegerField()
+    cancelled_count = serializers.IntegerField()
+    my_todo_count = serializers.IntegerField()
+    my_created_count = serializers.IntegerField()
+    my_assigned_count = serializers.IntegerField()
+    my_review_count = serializers.IntegerField()
+    status_stats = StatusStatsSerializer(many=True)
+    recent_todos = TodoItemSerializer(many=True)
+    role_focus = serializers.CharField()
