@@ -14,7 +14,7 @@ from .services import (
     StateMachineError, PermissionDeniedError, InvalidTransitionError,
 )
 from apps.core.exceptions import APIResponse
-from apps.core.permissions import IsAdmin, IsAdminOrOperatorB
+from apps.core.permissions import IsAdmin, IsAdminOrOperatorA, IsAdminOrOperatorB
 
 
 class ServiceTypeViewSet(viewsets.ModelViewSet):
@@ -109,12 +109,20 @@ class ServiceItemViewSet(viewsets.GenericViewSet,
         return ServiceItemDetailSerializer
 
     def get_queryset(self):
+        from apps.core.models import Role
+        from .models import ServiceStatus
         qs = super().get_queryset()
         user = self.request.user
         if not user.is_admin:
-            qs = qs.filter(
-                Q(creator=user) | Q(assignee=user) | Q(reviewer=user)
-            )
+            if user.is_operator_b:
+                qs = qs.filter(
+                    Q(creator=user) | Q(assignee=user) | Q(reviewer=user) |
+                    Q(status=ServiceStatus.PENDING_REVIEW)
+                )
+            else:
+                qs = qs.filter(
+                    Q(creator=user) | Q(assignee=user) | Q(reviewer=user)
+                )
         status_filter = self.request.query_params.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
@@ -141,11 +149,11 @@ class ServiceItemViewSet(viewsets.GenericViewSet,
         serializer = self.get_serializer(instance)
         return APIResponse(data=serializer.data)
 
-    @action(detail=False, methods=['post'])
+    @action(detail=False, methods=['post'], permission_classes=[IsAdminOrOperatorA])
     def submit(self, request):
-        serializer = self.get_serializer(data=request.data)
+        serializer = ServiceItemCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
+        data = serializer.validated_data.copy()
         data['item_no'] = generate_item_no()
         item = create_service_item(data, request.user)
         result_serializer = ServiceItemDetailSerializer(item)

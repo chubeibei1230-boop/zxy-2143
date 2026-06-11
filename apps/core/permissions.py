@@ -17,6 +17,11 @@ class IsOperatorB(BasePermission):
         return bool(request.user and request.user.is_authenticated and request.user.role == Role.OPERATOR_B)
 
 
+class IsAdminOrOperatorA(BasePermission):
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role in [Role.ADMIN, Role.OPERATOR_A])
+
+
 class IsAdminOrOperatorB(BasePermission):
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and request.user.role in [Role.ADMIN, Role.OPERATOR_B])

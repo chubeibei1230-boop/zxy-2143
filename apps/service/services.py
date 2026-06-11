@@ -1,3 +1,4 @@
+import uuid
 from django.utils import timezone
 from django.db import transaction
 from .models import (
@@ -50,8 +51,44 @@ class ServiceItemStateMachine:
             if self.operator.role not in [Role.OPERATOR_B, Role.ADMIN]:
                 raise PermissionDeniedError('只有复核员或管理员可以关闭事项')
         elif target_status == ServiceStatus.CANCELLED:
-            pass
+            if self.operator.role not in [Role.OPERATOR_A, Role.OPERATOR_B, Role.ADMIN]:
+                raise PermissionDeniedError('只有相关人员可以取消事项')
         return True
+
+    def _check_operation_permission(self, operation_type, after_status=None):
+        from apps.core.models import Role
+
+        if self.operator.role == Role.ADMIN:
+            return True
+
+        if operation_type == OperationType.CREATE:
+            raise PermissionDeniedError('只有管理员可以撤销创建操作')
+
+        if operation_type == OperationType.STATUS_CHANGE and after_status:
+            if after_status == ServiceStatus.PROCESSING:
+                if self.operator.role not in [Role.OPERATOR_A, Role.ADMIN]:
+                    raise PermissionDeniedError('只有录入员或管理员可以撤销受理操作')
+            elif after_status == ServiceStatus.PENDING_REVIEW:
+                if self.operator.role not in [Role.OPERATOR_A, Role.ADMIN]:
+                    raise PermissionDeniedError('只有录入员或管理员可以撤销提交复核操作')
+            elif after_status == ServiceStatus.CLOSED:
+                if self.operator.role not in [Role.OPERATOR_B, Role.ADMIN]:
+                    raise PermissionDeniedError('只有复核员或管理员可以撤销关闭操作')
+            elif after_status == ServiceStatus.CANCELLED:
+                raise PermissionDeniedError('已取消的操作不可撤销')
+
+        if operation_type == OperationType.CANCEL:
+            raise PermissionDeniedError('取消操作不可撤销')
+
+        return True
+
+    def _get_latest_undoable_log(self):
+        return AuditLog.objects.filter(
+            service_item=self.service_item,
+            is_undone=False,
+        ).exclude(
+            operation_type__in=[OperationType.UNDO, OperationType.REDO]
+        ).order_by('-created_at', '-id').first()
 
     @transaction.atomic
     def transition_to(self, target_status, note='', **kwargs):
@@ -127,6 +164,15 @@ class ServiceItemStateMachine:
 
     @transaction.atomic
     def undo(self, audit_log_id):
+        latest_undoable = self._get_latest_undoable_log()
+        if not latest_undoable:
+            raise StateMachineError('没有可撤销的操作')
+
+        if latest_undoable.id != audit_log_id:
+            raise StateMachineError(
+                f'只能撤销最近的一条操作（最近可撤销操作ID: {latest_undoable.id}）'
+            )
+
         try:
             audit_log = AuditLog.objects.select_for_update().get(
                 id=audit_log_id,
@@ -141,15 +187,23 @@ class ServiceItemStateMachine:
         if audit_log.operation_type in [OperationType.UNDO, OperationType.REDO]:
             raise StateMachineError('不能撤销撤销/重做操作本身')
 
-        from apps.core.models import Role
-        if self.operator.role != Role.ADMIN:
-            if audit_log.operation_type == OperationType.CREATE:
-                raise PermissionDeniedError('只有管理员可以撤销创建操作')
-            if audit_log.operation_type == OperationType.STATUS_CHANGE:
-                before_status = audit_log.before_snapshot.get('status')
-                after_status = audit_log.after_snapshot.get('status')
-                if after_status == ServiceStatus.CLOSED and self.operator.role not in [Role.OPERATOR_B, Role.ADMIN]:
-                    raise PermissionDeniedError('只有复核员或管理员可以撤销关闭操作')
+        after_status = audit_log.after_snapshot.get('status')
+        self._check_operation_permission(audit_log.operation_type, after_status)
+
+        if audit_log.operation_type == OperationType.STATUS_CHANGE and after_status in FINAL_STATUSES:
+            pass
+        elif audit_log.operation_type == OperationType.STATUS_CHANGE:
+            before_status = audit_log.before_snapshot.get('status')
+            after_status_current = self.service_item.status
+            if after_status != after_status_current:
+                raise StateMachineError(
+                    f'当前状态与操作后状态不一致，无法撤销。'
+                    f'操作后状态应为 {ServiceStatus(after_status).label}，'
+                    f'当前状态为 {ServiceStatus(after_status_current).label}'
+                )
+            if before_status and before_status not in STATUS_TRANSITIONS:
+                if before_status not in FINAL_STATUSES:
+                    raise StateMachineError(f'撤销后的目标状态 {ServiceStatus(before_status).label} 无效')
 
         before_snapshot_current = self.service_item.snapshot()
 
@@ -164,6 +218,16 @@ class ServiceItemStateMachine:
         audit_log.undone_at = timezone.now()
         audit_log.save()
 
+        AuditLog.objects.filter(
+            service_item=self.service_item,
+            redo_of=audit_log,
+            is_undone=False
+        ).update(
+            is_undone=True,
+            undone_by=self.operator,
+            undone_at=timezone.now()
+        )
+
         undo_note = f'撤销操作: {audit_log.get_operation_type_display()}'
         self._create_audit_log(
             OperationType.UNDO,
@@ -174,8 +238,25 @@ class ServiceItemStateMachine:
 
         return self.service_item
 
+    def _get_latest_undone_log(self):
+        return AuditLog.objects.filter(
+            service_item=self.service_item,
+            is_undone=True,
+        ).exclude(
+            operation_type__in=[OperationType.UNDO, OperationType.REDO]
+        ).order_by('-created_at', '-id').first()
+
     @transaction.atomic
     def redo(self, audit_log_id):
+        latest_undone = self._get_latest_undone_log()
+        if not latest_undone:
+            raise StateMachineError('没有可重做的操作')
+
+        if latest_undone.id != audit_log_id:
+            raise StateMachineError(
+                f'只能重做最近被撤销的操作（最近可重做操作ID: {latest_undone.id}）'
+            )
+
         try:
             original_log = AuditLog.objects.select_for_update().get(
                 id=audit_log_id,
@@ -190,13 +271,24 @@ class ServiceItemStateMachine:
         if original_log.operation_type in [OperationType.UNDO, OperationType.REDO]:
             raise StateMachineError('不能重做撤销/重做操作本身')
 
-        current_status = self.service_item.status
         target_status = original_log.after_snapshot.get('status')
-        if target_status and target_status != current_status:
-            if current_status not in FINAL_STATUSES and target_status not in STATUS_TRANSITIONS.get(current_status, []):
-                raise InvalidTransitionError(
-                    f'重做会导致非法状态转换: {ServiceStatus(current_status).label} -> {ServiceStatus(target_status).label}'
+        self._check_operation_permission(original_log.operation_type, target_status)
+
+        current_status = self.service_item.status
+        before_status_expected = original_log.before_snapshot.get('status')
+
+        if original_log.operation_type == OperationType.STATUS_CHANGE:
+            if before_status_expected and before_status_expected != current_status:
+                raise StateMachineError(
+                    f'当前状态与重做前预期状态不一致，无法重做。'
+                    f'重做前状态应为 {ServiceStatus(before_status_expected).label}，'
+                    f'当前状态为 {ServiceStatus(current_status).label}'
                 )
+            if target_status and target_status != current_status:
+                if current_status not in FINAL_STATUSES and target_status not in STATUS_TRANSITIONS.get(current_status, []):
+                    raise InvalidTransitionError(
+                        f'重做会导致非法状态转换: {ServiceStatus(current_status).label} -> {ServiceStatus(target_status).label}'
+                    )
 
         before_snapshot_current = self.service_item.snapshot()
 
@@ -258,14 +350,4 @@ def create_service_item(data, creator):
 
 
 def generate_item_no():
-    now = timezone.now()
-    prefix = now.strftime('%Y%m%d%H%M%S')
-    last = ServiceItem.objects.filter(item_no__startswith=prefix).order_by('-item_no').first()
-    if last:
-        try:
-            seq = int(last.item_no[-4:]) + 1
-        except (ValueError, IndexError):
-            seq = 1
-    else:
-        seq = 1
-    return f'{prefix}{seq:04d}'
+    return f'SV{timezone.now().strftime("%Y%m%d%H%M%S")}{uuid.uuid4().hex[:6].upper()}'
